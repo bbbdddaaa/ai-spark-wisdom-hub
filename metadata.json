@@ -1,0 +1,7 @@
+{
+  "name": "AI Spark - AI Wisdom Sharing Hub",
+  "description": "A vibrant community platform for sharing AI tips, tricks, and life-changing stories, featuring a virtual token reward system to incentivize knowledge sharing.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
