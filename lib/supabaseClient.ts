@@ -4,12 +4,17 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-if (!supabaseUrl || !supabaseAnonKey) {
+// 检查环境变量
+const hasSupabaseConfig = supabaseUrl && supabaseAnonKey;
+
+if (!hasSupabaseConfig) {
   console.warn('⚠️  Supabase环境变量未配置，将使用模拟数据模式');
 }
 
-// 创建Supabase客户端
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// 创建Supabase客户端（仅在有配置时创建）
+export const supabase = hasSupabaseConfig 
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
 
 // 数据库类型定义（与Supabase表结构对应）
 export interface DbUser {

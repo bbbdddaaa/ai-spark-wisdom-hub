@@ -69,18 +69,21 @@ const App: React.FC = () => {
   useEffect(() => {
     loadPosts();
     
-    const postsSubscription = supabaseService.subscribeToPosts((newPost) => {
-      setPosts(prev => [newPost, ...prev]);
-    });
+    // 仅在Supabase配置时订阅
+    if (supabaseService.supabase) {
+      const postsSubscription = supabaseService.subscribeToPosts((newPost) => {
+        setPosts(prev => [newPost, ...prev]);
+      });
 
-    const likesSubscription = supabaseService.subscribeToLikes(async () => {
-      await loadPosts();
-    });
+      const likesSubscription = supabaseService.subscribeToLikes(async () => {
+        await loadPosts();
+      });
 
-    return () => {
-      postsSubscription.unsubscribe();
-      likesSubscription.unsubscribe();
-    };
+      return () => {
+        postsSubscription.unsubscribe();
+        likesSubscription.unsubscribe();
+      };
+    }
   }, []);
 
   const loadPosts = async () => {

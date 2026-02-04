@@ -6,12 +6,32 @@ import { validatePostData } from '../lib/security';
 // 导出supabase实例供直接使用
 export const supabase = supabaseClient;
 
+// 检查Supabase是否配置
+const ensureSupabase = () => {
+  if (!supabaseClient) {
+    throw new Error('Supabase未配置。请在Vercel设置环境变量：VITE_SUPABASE_URL 和 VITE_SUPABASE_ANON_KEY');
+  }
+  return supabaseClient;
+};
+
 // ==================== 用户相关操作 ====================
 
 /**
  * 获取或创建用户
  */
 export const getOrCreateUser = async (address: string): Promise<User> => {
+  if (!supabaseClient) {
+    // 模拟数据模式：返回默认用户
+    return {
+      address,
+      tokens: 0,
+      isConnected: true,
+      dailyPostCount: 0,
+      dailyLikeCount: 0,
+      lastResetDate: getTodayString()
+    };
+  }
+  
   // 先尝试获取用户
   const { data: existingUser, error: fetchError } = await supabaseClient
     .from('users')
@@ -133,6 +153,11 @@ export const updateUserDailyStats = async (
  * 获取所有帖子
  */
 export const fetchPosts = async (): Promise<Post[]> => {
+  if (!supabaseClient) {
+    // 模拟数据模式：返回空数组
+    return [];
+  }
+  
   const { data: posts, error } = await supabaseClient
     .from('posts')
     .select('*')
@@ -321,6 +346,11 @@ const dbTransactionToTransaction = (dbTx: DbTransaction): TokenTransaction => ({
  * 订阅帖子变化
  */
 export const subscribeToPosts = (callback: (post: Post) => void) => {
+  if (!supabaseClient) {
+    // 返回一个空的订阅对象
+    return { unsubscribe: () => {} };
+  }
+  
   return supabaseClient
     .channel('posts-channel')
     .on('postgres_changes', 
@@ -338,6 +368,11 @@ export const subscribeToPosts = (callback: (post: Post) => void) => {
  * 订阅点赞变化
  */
 export const subscribeToLikes = (callback: (like: DbLike) => void) => {
+  if (!supabaseClient) {
+    // 返回一个空的订阅对象
+    return { unsubscribe: () => {} };
+  }
+  
   return supabaseClient
     .channel('likes-channel')
     .on('postgres_changes',
