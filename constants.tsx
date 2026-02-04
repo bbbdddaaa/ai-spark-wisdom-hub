@@ -7,23 +7,39 @@ export const COLORS = {
   warning: '#f59e0b',
 };
 
-// 经济模型配置
+// Economy config (blockchain version)
 export const ECONOMY_CONFIG = {
-  INITIAL_TOKENS: 20,           // 连接钱包初始代币
-  POST_REWARD_BASE: 10,          // 基础发帖奖励
-  POST_REWARD_REDUCED: 3,        // 超限后的发帖奖励
-  DAILY_POST_LIMIT: 3,           // 每日高额奖励发帖数量
-  DAILY_LIKE_EARN_LIMIT: 50,     // 每日从点赞最多获得代币
-  LIKE_COST: 1,                  // 点赞花费
-  PLATFORM_FEE: 0.1,             // 平台手续费 10%
-  FEATURED_REWARD: 100,          // 精选奖励
+  INITIAL_TOKENS: 20,
+  POST_REWARD_BASE: 10,
+  POST_REWARD_REDUCED: 3,
+  DAILY_POST_LIMIT: 3,
+  DAILY_LIKE_EARN_LIMIT: 50,
+  LIKE_COST: 1,
+  PLATFORM_FEE: 0.1,
+  FEATURED_REWARD: 100,
+  
+  MINT_COST_USDT: 10,
+  MINT_REWARD_SPARK: 10000,
+  MINT_ELIGIBLE_USERS: 2000,
+  
+  MEMBERSHIP_COST_USDT: 10,
+  MEMBERSHIP_DURATION_DAYS: 30,
+  
+  WEEKLY_REWARD_RANK_1: 10000,
+  WEEKLY_REWARD_RANK_10: 2000,
+  WEEKLY_REWARD_DECREASE: 889,
+  
+  BUYBACK_THRESHOLD_USDT: 100,
+  BUYBACK_SPLIT_RATIO: 1.0,
+  
+  POST_REWARD_ELIGIBLE_USERS: 2000,
 };
 
 export const CATEGORY_COLORS: Record<string, string> = {
-  'AI Tips & Tricks': 'bg-blue-900/30 text-blue-400 border border-blue-800',
-  'Life Change Story': 'bg-purple-900/30 text-purple-400 border border-purple-800',
-  'Prompt Engineering': 'bg-emerald-900/30 text-emerald-400 border border-emerald-800',
-  'New Tool Review': 'bg-orange-900/30 text-orange-400 border border-orange-800',
+  'AI Tips & Tricks': 'bg-blue-100 text-blue-700',
+  'Life Change Story': 'bg-purple-100 text-purple-700',
+  'Prompt Engineering': 'bg-emerald-100 text-emerald-700',
+  'New Tool Review': 'bg-orange-100 text-orange-700',
 };
 
 export const truncateAddress = (address: string) => {
@@ -35,12 +51,10 @@ export const getAvatarUrl = (address: string) => {
   return `https://api.dicebear.com/7.x/identicon/svg?seed=${address}`;
 };
 
-// 辅助函数：获取今天的日期字符串
 export const getTodayString = () => {
   return new Date().toISOString().split('T')[0];
 };
 
-// 计算点赞收益
 export const calculateLikeReward = (likeCost: number, platformFee: number) => {
   return likeCost * (1 - platformFee);
 };

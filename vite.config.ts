@@ -18,6 +18,8 @@ export default defineConfig(({ mode }) => {
         alias: {
           '@': path.resolve(__dirname, '.'),
         }
-      }
+      },
+      // 确保 VITE_ 开头的环境变量被正确加载
+      envPrefix: 'VITE_'
     };
 });
