@@ -26,6 +26,9 @@ dist-ssr
 # Environment variables
 .env
 .env.local
+*.local.bak
+*.bak
+.env*.bak
 
 # Hardhat files
 cache
