@@ -35,6 +35,14 @@ export interface DbPost {
   content: string;
   tags: string[];
   likes: number;
+  ai_score_relevance?: number | null;
+  ai_score_quality?: number | null;
+  ai_score_value?: number | null;
+  ai_score_total?: number | null;
+  ai_score_details?: string | null;
+  category?: string | null;
+  secondary_category?: string | null;
+  scored_at?: string | null;
   created_at: string;
 }
 

@@ -8,9 +8,20 @@ import {
   getSecurityConfig,
   type ValidationResult 
 } from '../lib/security';
+import { ScoringResult } from '../services/agentScoringService';
+import { CategorizationResult } from '../services/postCategorizationService';
+import { ScoringResultCard } from './ScoringResultCard';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3100';
 
 interface PostFormProps {
-  onSubmit: (data: { title: string; content: string; tags: string[] }) => void;
+  onSubmit: (data: { 
+    title: string; 
+    content: string; 
+    tags: string[];
+    scoringResult?: ScoringResult;
+    categorizationResult?: CategorizationResult;
+  }) => void;
   onClose: () => void;
   loading?: boolean;
 }
@@ -22,6 +33,10 @@ const PostForm: React.FC<PostFormProps> = ({ onSubmit, onClose, loading = false 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [showSecurityCheck, setShowSecurityCheck] = useState(false);
+  const [isScoring, setIsScoring] = useState(false);
+  const [scoringResult, setScoringResult] = useState<ScoringResult | null>(null);
+  const [categorizationResult, setCategorizationResult] = useState<CategorizationResult | null>(null);
+  const [showScoringResult, setShowScoringResult] = useState(false);
   
   const securityConfig = getSecurityConfig();
 
@@ -56,10 +71,10 @@ const PostForm: React.FC<PostFormProps> = ({ onSubmit, onClose, loading = false 
     setIsAnalyzing(false);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!submissionThrottle.canSubmit()) {
       const remaining = submissionThrottle.getRemainingCooldown();
-      setValidationErrors([`Please wait ${remaining} seconds before submitting`]);
+      setValidationErrors([`Please wait ${remaining} seconds before submitting again`]);
       return;
     }
     
@@ -71,9 +86,73 @@ const PostForm: React.FC<PostFormProps> = ({ onSubmit, onClose, loading = false 
       return;
     }
     
+    // Start AI scoring process
+    setIsScoring(true);
+    setValidationErrors([]);
+    
+    try {
+      // Call backend API for scoring and categorization in parallel
+      const [scoringResponse, categorizationResponse] = await Promise.all([
+        fetch(`${API_URL}/api/score-post`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: validation.sanitizedData!.title,
+            content: validation.sanitizedData!.content
+          })
+        }),
+        fetch(`${API_URL}/api/categorize-post`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: validation.sanitizedData!.title,
+            content: validation.sanitizedData!.content
+          })
+        })
+      ]);
+      
+      const scoringData = await scoringResponse.json();
+      const categorizationData = await categorizationResponse.json();
+      
+      if (!scoringData.success || !categorizationData.success) {
+        throw new Error('AI service returned an error');
+      }
+      
+      setScoringResult(scoringData.data);
+      setCategorizationResult(categorizationData.data);
+      setShowScoringResult(true);
+      
+      // If scoring passes, can submit directly, or wait for user confirmation
+      // Here we let user confirm before submitting
+    } catch (error) {
+      console.error('Scoring failed:', error);
+      setValidationErrors(['AI scoring service is temporarily unavailable, please try again later']);
+    } finally {
+      setIsScoring(false);
+    }
+  };
+  
+  const handleConfirmPublish = () => {
+    if (!scoringResult || !scoringResult.isPassing) {
+      setValidationErrors(['Scoring did not pass, cannot publish']);
+      return;
+    }
+    
     submissionThrottle.recordSubmit();
     
-    onSubmit(validation.sanitizedData!);
+    const validation = validatePostData(title, content, tags);
+    // 传入评分结果，避免后端重复评分
+    onSubmit({
+      ...validation.sanitizedData!,
+      scoringResult,
+      categorizationResult: categorizationResult || undefined
+    });
+  };
+  
+  const handleCancelScoring = () => {
+    setShowScoringResult(false);
+    setScoringResult(null);
+    setCategorizationResult(null);
   };
 
   const titleLength = title.length;
@@ -100,6 +179,35 @@ const PostForm: React.FC<PostFormProps> = ({ onSubmit, onClose, loading = false 
         </div>
 
         <div className="flex-1 overflow-y-auto px-8 py-8 space-y-6 no-scrollbar">
+          {/* Scoring result display */}
+          {showScoringResult && scoringResult && categorizationResult && (
+            <div className="animate-in slide-in-from-top-4 duration-500">
+              <ScoringResultCard
+                scoring={scoringResult}
+                categorization={categorizationResult}
+                onConfirm={scoringResult.isPassing ? handleConfirmPublish : undefined}
+                onCancel={handleCancelScoring}
+                isPublishing={loading}
+              />
+            </div>
+          )}
+          
+          {/* Loading state during scoring */}
+          {isScoring && (
+            <div className="bg-purple-50 border-2 border-purple-200 rounded-lg p-6 animate-pulse">
+              <div className="flex items-center justify-center space-x-3">
+                <Loader2 className="animate-spin text-purple-600" size={24} />
+                <div className="text-center">
+                  <p className="text-lg font-bold text-purple-900">AI Scoring...</p>
+                  <p className="text-sm text-purple-600 mt-1">Analyzing post quality and categorization</p>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          {/* Hide form if scoring result is already displayed */}
+          {!showScoringResult && (
+            <>
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs font-bold text-slate-400 uppercase tracking-widest">Title</label>
@@ -181,12 +289,15 @@ const PostForm: React.FC<PostFormProps> = ({ onSubmit, onClose, loading = false 
               </div>
             </div>
           </div>
+          </>
+          )}
         </div>
 
+        {!showScoringResult && (
         <div className="p-8 border-t border-slate-50 bg-slate-50/50">
           <button 
             onClick={handleSubmit}
-            disabled={loading || !title || !content || validationErrors.some(e => e.includes('cannot be empty') || e.includes('at least'))}
+            disabled={loading || isScoring || !title || !content || validationErrors.some(e => e.includes('cannot be empty') || e.includes('at least'))}
             className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black text-sm flex items-center justify-center space-x-2 shadow-lg hover:bg-indigo-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-900"
           >
             {loading ? (
@@ -194,19 +305,25 @@ const PostForm: React.FC<PostFormProps> = ({ onSubmit, onClose, loading = false 
                 <Loader2 className="animate-spin" size={18} />
                 <span>Publishing...</span>
               </>
+            ) : isScoring ? (
+              <>
+                <Loader2 className="animate-spin" size={18} />
+                <span>AI Scoring...</span>
+              </>
             ) : validationErrors.length === 0 && title && content ? (
               <>
                 <CheckCircle size={18} />
-                <span>Publish & earn 10 Spark</span>
+                <span>AI Score & Publish</span>
               </>
             ) : (
               <>
                 <Send size={18} />
-                <span>Publish & earn 10 Spark</span>
+                <span>AI Score & Publish</span>
               </>
             )}
           </button>
         </div>
+        )}
       </div>
     </div>
   );

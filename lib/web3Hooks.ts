@@ -7,6 +7,8 @@ import {
   MINT_CONTROLLER_ABI,
   MEMBERSHIP_MANAGER_ABI,
   REWARD_POOL_ABI,
+  POST_SCORING_AGENT_ABI,
+  MIN_PASSING_SCORE
 } from './web3Config';
 
 // 读取SPARK余额
@@ -111,6 +113,34 @@ export function useMembershipStatus(address?: string) {
   return {
     isActive,
     remainingTime: remainingTime ? Number(remainingTime) : 0,
+  };
+}
+
+// Transfer SPARK tokens
+export function useTransferSpark() {
+  const { writeContract, data: hash, isPending } = useWriteContract();
+
+  const transfer = (to: string, amount: string) => {
+    const amountInUnits = parseUnits(amount, 18); // SPARK has 18 decimals
+    
+    writeContract({
+      address: CONTRACT_ADDRESSES.SPARK_TOKEN as `0x${string}`,
+      abi: SPARK_TOKEN_ABI,
+      functionName: 'transfer',
+      args: [to as `0x${string}`, amountInUnits],
+    });
+  };
+
+  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+    hash,
+  });
+
+  return {
+    transfer,
+    isPending,
+    isConfirming,
+    isSuccess,
+    hash,
   };
 }
 
@@ -232,4 +262,175 @@ export function useWeeklyReward(weekId?: number, address?: string) {
       enabled: !!weekId && !!targetAddress && !!CONTRACT_ADDRESSES.REWARD_POOL,
     },
   });
+}
+
+// ==================== Post Scoring Agent相关Hooks ====================
+
+/**
+ * 获取Agent信息
+ */
+export function useAgentInfo(tokenId?: number) {
+  return useReadContract({
+    address: CONTRACT_ADDRESSES.POST_SCORING_AGENT as `0x${string}`,
+    abi: POST_SCORING_AGENT_ABI,
+    functionName: 'getAgentInfo',
+    args: tokenId !== undefined ? [BigInt(tokenId)] : undefined,
+    query: {
+      enabled: tokenId !== undefined && !!CONTRACT_ADDRESSES.POST_SCORING_AGENT,
+    },
+  });
+}
+
+/**
+ * 获取当前账户的Agent Token ID
+ */
+export function useAgentTokenId(address?: string) {
+  const { address: connectedAddress } = useAccount();
+  const targetAddress = address || connectedAddress;
+
+  return useReadContract({
+    address: CONTRACT_ADDRESSES.POST_SCORING_AGENT as `0x${string}`,
+    abi: POST_SCORING_AGENT_ABI,
+    functionName: 'agentTokenIds',
+    args: targetAddress ? [targetAddress as `0x${string}`] : undefined,
+    query: {
+      enabled: !!targetAddress && !!CONTRACT_ADDRESSES.POST_SCORING_AGENT,
+    },
+  });
+}
+
+/**
+ * 检查帖子是否已评分
+ */
+export function useIsPostScored(postHash?: string) {
+  return useReadContract({
+    address: CONTRACT_ADDRESSES.POST_SCORING_AGENT as `0x${string}`,
+    abi: POST_SCORING_AGENT_ABI,
+    functionName: 'isPostScored',
+    args: postHash ? [postHash as `0x${string}`] : undefined,
+    query: {
+      enabled: !!postHash && !!CONTRACT_ADDRESSES.POST_SCORING_AGENT,
+    },
+  });
+}
+
+/**
+ * 获取帖子评分记录
+ */
+export function useScoringRecord(postHash?: string) {
+  return useReadContract({
+    address: CONTRACT_ADDRESSES.POST_SCORING_AGENT as `0x${string}`,
+    abi: POST_SCORING_AGENT_ABI,
+    functionName: 'getScoringRecord',
+    args: postHash ? [postHash as `0x${string}`] : undefined,
+    query: {
+      enabled: !!postHash && !!CONTRACT_ADDRESSES.POST_SCORING_AGENT,
+    },
+  });
+}
+
+/**
+ * 记录评分到链上（仅Agent owner可调用）
+ */
+export function useRecordScore() {
+  const { writeContract, data: hash, isPending } = useWriteContract();
+
+  const recordScore = (
+    postHash: string,
+    relevanceScore: number,
+    qualityScore: number,
+    valueScore: number
+  ) => {
+    if (!CONTRACT_ADDRESSES.POST_SCORING_AGENT) {
+      throw new Error('Agent contract not configured');
+    }
+
+    writeContract({
+      address: CONTRACT_ADDRESSES.POST_SCORING_AGENT as `0x${string}`,
+      abi: POST_SCORING_AGENT_ABI,
+      functionName: 'recordScore',
+      args: [
+        postHash as `0x${string}`,
+        relevanceScore,
+        qualityScore,
+        valueScore
+      ],
+    });
+  };
+
+  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+    hash,
+  });
+
+  return {
+    recordScore,
+    isPending,
+    isConfirming,
+    isSuccess,
+    hash,
+  };
+}
+
+/**
+ * 注册新的Agent（仅owner可调用）
+ */
+export function useRegisterAgent() {
+  const { writeContract, data: hash, isPending } = useWriteContract();
+
+  const registerAgent = (agentURI: string) => {
+    if (!CONTRACT_ADDRESSES.POST_SCORING_AGENT) {
+      throw new Error('Agent contract not configured');
+    }
+
+    writeContract({
+      address: CONTRACT_ADDRESSES.POST_SCORING_AGENT as `0x${string}`,
+      abi: POST_SCORING_AGENT_ABI,
+      functionName: 'registerAgent',
+      args: [agentURI],
+    });
+  };
+
+  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+    hash,
+  });
+
+  return {
+    registerAgent,
+    isPending,
+    isConfirming,
+    isSuccess,
+    hash,
+  };
+}
+
+/**
+ * 更新Agent URI（仅Agent owner可调用）
+ */
+export function useUpdateAgentURI() {
+  const { writeContract, data: hash, isPending } = useWriteContract();
+
+  const updateAgentURI = (tokenId: number, newAgentURI: string) => {
+    if (!CONTRACT_ADDRESSES.POST_SCORING_AGENT) {
+      throw new Error('Agent contract not configured');
+    }
+
+    writeContract({
+      address: CONTRACT_ADDRESSES.POST_SCORING_AGENT as `0x${string}`,
+      abi: POST_SCORING_AGENT_ABI,
+      functionName: 'updateAgentURI',
+      args: [BigInt(tokenId), newAgentURI],
+    });
+  };
+
+  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+    hash,
+  });
+
+  return {
+    updateAgentURI,
+    isPending,
+    isConfirming,
+    isSuccess,
+    hash,
+  };
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { useAccount, useConnect, useDisconnect } from 'wagmi';
-import { User, Post, TokenTransaction } from './types';
+import { useAccount, useConnect, useDisconnect, useReadContract } from 'wagmi';
+import { User, Post } from './types';
 import { truncateAddress, getAvatarUrl, ECONOMY_CONFIG, getTodayString, calculateLikeReward } from './constants';
 import PostCard from './components/PostCard';
 import PostForm from './components/PostForm';
@@ -9,7 +9,12 @@ import LoadingSpinner from './components/LoadingSpinner';
 import MintPanel from './components/MintPanel';
 import MembershipPanel from './components/MembershipPanel';
 import WeeklyRankingPanel from './components/WeeklyRankingPanel';
+import { PostDetailModal } from './components/PostDetailModal';
+import MintProgressBar from './components/MintProgressBar';
 import * as supabaseService from './services/supabaseService';
+import { CONTRACT_ADDRESSES, MINT_CONTROLLER_ABI } from './lib/web3Config';
+import { useSparkBalance, useUsdtBalance, useTransferSpark } from './lib/web3Hooks';
+import { formatUnits } from 'viem';
 import { 
   Zap, 
   Plus, 
@@ -46,13 +51,31 @@ const App: React.FC = () => {
   });
   const [posts, setPosts] = useState<Post[]>([]);
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [transactions, setTransactions] = useState<TokenTransaction[]>([]);
-  const [likeEarnedToday, setLikeEarnedToday] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [isLoadingPosts, setIsLoadingPosts] = useState(false);
   
   const { address, isConnected } = useAccount();
   const { connect, connectors } = useConnect();
   const { disconnect } = useDisconnect();
+  
+  // Get real mint progress data
+  const { data: totalMintedUsers } = useReadContract({
+    address: CONTRACT_ADDRESSES.MINT_CONTROLLER as `0x${string}`,
+    abi: MINT_CONTROLLER_ABI,
+    functionName: 'totalMintedUsers',
+  });
+  
+  // Get real on-chain SPARK balance
+  const { data: sparkBalanceRaw, refetch: refetchSparkBalance } = useSparkBalance(address);
+  const sparkBalance = sparkBalanceRaw ? Number(formatUnits(sparkBalanceRaw as bigint, 18)) : 0;
+  
+  // Get real on-chain USDT balance
+  const { data: usdtBalanceRaw } = useUsdtBalance(address);
+  const usdtBalance = usdtBalanceRaw ? Number(formatUnits(usdtBalanceRaw as bigint, 6)) : 0;
+  
+  // Transfer SPARK hook for likes
+  const { transfer: transferSpark, isPending: isTransferring, isConfirming: isTransferConfirming, isSuccess: isTransferSuccess } = useTransferSpark();
   
   // Toast state
   const [toast, setToast] = useState<{ type: ToastType; message: string } | null>(null);
@@ -69,14 +92,24 @@ const App: React.FC = () => {
   useEffect(() => {
     loadPosts();
     
-    // 仅在Supabase配置时订阅
+    // Subscribe only when Supabase is configured
     if (supabaseService.supabase) {
       const postsSubscription = supabaseService.subscribeToPosts((newPost) => {
         setPosts(prev => [newPost, ...prev]);
       });
 
-      const likesSubscription = supabaseService.subscribeToLikes(async () => {
-        await loadPosts();
+      // 优化：点赞时只更新特定帖子的点赞数，不重新加载所有帖子
+      const likesSubscription = supabaseService.subscribeToLikes(async (like) => {
+        setPosts(prev => prev.map(post => {
+          if (post.id === like.post_id) {
+            return {
+              ...post,
+              likes: post.likes + 1,
+              likedBy: [...post.likedBy, like.user_address]
+            };
+          }
+          return post;
+        }));
       });
 
       return () => {
@@ -86,13 +119,38 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const loadPosts = async () => {
+  const loadPosts = async (retryCount = 0) => {
+    // 防止重复加载
+    if (isLoadingPosts) {
+      return;
+    }
+
+    setIsLoadingPosts(true);
     try {
       const fetchedPosts = await supabaseService.fetchPosts();
       setPosts(fetchedPosts);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to load posts:', error);
-      alert('Failed to load posts. Please refresh the page.');
+      
+      // 自动重试机制（最多重试2次）
+      if (retryCount < 2) {
+        console.log(`Retrying... (attempt ${retryCount + 1}/2)`);
+        setTimeout(() => {
+          setIsLoadingPosts(false);
+          loadPosts(retryCount + 1);
+        }, 1000 * (retryCount + 1)); // 递增延迟：1s, 2s
+        return;
+      }
+      
+      // 重试失败后才显示错误
+      const errorMessage = error?.message || 'Unknown error';
+      if (errorMessage.includes('rate limit') || errorMessage.includes('too many')) {
+        showToast('warning', 'Loading too fast, please wait a moment...');
+      } else {
+        showToast('error', 'Failed to load posts. Please try again later.');
+      }
+    } finally {
+      setIsLoadingPosts(false);
     }
   };
 
@@ -108,8 +166,6 @@ const App: React.FC = () => {
         dailyLikeCount: 0,
         lastResetDate: getTodayString()
       });
-      setTransactions([]);
-      setLikeEarnedToday(0);
     }
   }, [isConnected, address]);
 
@@ -119,23 +175,10 @@ const App: React.FC = () => {
       const fetchedUser = await supabaseService.getOrCreateUser(walletAddress);
       setUser(fetchedUser);
       
-      const fetchedTransactions = await supabaseService.fetchUserTransactions(walletAddress);
-      setTransactions(fetchedTransactions);
-      
-      const { data: userData } = await supabaseService.supabase
-        .from('users')
-        .select('like_earned_today')
-        .eq('address', walletAddress)
-        .single();
-      
-      if (userData) {
-        setLikeEarnedToday(Number(userData.like_earned_today));
-      }
-      
-      showToast('success', `🎉 Wallet connected! Address: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`);
+      showToast('success', `🎉 钱包已连接！地址: ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`);
     } catch (error) {
       console.error('Failed to load user data:', error);
-      showToast('error', 'Load failed. Please refresh the page.');
+      showToast('error', '加载失败，请刷新页面。');
     } finally {
       setLoading(false);
     }
@@ -195,7 +238,9 @@ const App: React.FC = () => {
         user.address,
         data.title,
         data.content,
-        data.tags
+        data.tags,
+        data.scoringResult,  // 传入前端的评分结果
+        data.categorizationResult  // 传入前端的分类结果
       );
       
       setPosts(prev => [newPost, ...prev]);
@@ -209,23 +254,42 @@ const App: React.FC = () => {
         dailyPostCount: prev.dailyPostCount + 1
       }));
       
-      const updatedTransactions = await supabaseService.fetchUserTransactions(user.address);
-      setTransactions(updatedTransactions);
-      
       const { data: updatedUser } = await supabaseService.supabase
         .from('users')
         .select('is_eligible_for_mint, has_minted, post_count')
         .eq('address', user.address)
         .single();
       
+      // 🚀 调用 API 授予链上 Mint 资格（异步，不阻塞）
+      if (updatedUser?.post_count === 1) {
+        // 如果是第一篇帖子，触发授予资格
+        const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3100';
+        fetch(`${apiUrl}/api/grant-eligibility`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: user.address }),
+        })
+          .then(res => res.json())
+          .then(result => {
+            if (result.success) {
+              console.log('✅ 链上资格授予成功:', result.txHash);
+            } else {
+              console.warn('⚠️ 链上资格授予失败:', result.error);
+            }
+          })
+          .catch(err => {
+            console.error('❌ 调用授予资格 API 失败:', err);
+          });
+      }
+      
       setIsFormOpen(false);
       
       if (updatedUser?.is_eligible_for_mint && !updatedUser?.has_minted) {
-        showToast('success', '🎉 Post published! You got Mint eligibility (top 2000). Pay 10 USDT to mint 10,000 SPARK!');
+        showToast('success', '🎉 帖子已发布！你获得了 Mint 资格（前2000名）。支付 10 USDT 即可铸造 10,000 SPARK！');
       } else if (updatedUser?.has_minted) {
-        showToast('success', '✨ Post published! Join weekly ranking — top 10 earn token rewards.');
+        showToast('success', '✨ 帖子已发布！参与每周排名 — 前10名可获得代币奖励。');
       } else {
-        showToast('success', '✨ Post published! Mint slots full — join weekly ranking for token rewards.');
+        showToast('success', '✨ 帖子已发布！Mint 名额已满 — 参与每周排名可获得代币奖励。');
       }
     } catch (error: any) {
       console.error('Failed to publish:', error);
@@ -260,83 +324,58 @@ const App: React.FC = () => {
       return;
     }
 
-    if (user.tokens < ECONOMY_CONFIG.LIKE_COST) {
-      showToast('error', `Like costs ${ECONOMY_CONFIG.LIKE_COST} Spark. Insufficient balance.`);
+    if (sparkBalance < ECONOMY_CONFIG.LIKE_COST) {
+      showToast('error', `点赞需要 ${ECONOMY_CONFIG.LIKE_COST} SPARK。你的链上余额不足。`);
       return;
     }
 
-    if (loading) return;
+    if (loading || isTransferring || isTransferConfirming) return;
 
     setLoading(true);
     try {
+      // 1. 先记录点赞关系到数据库
       await supabaseService.likePost(postId, user.address);
       
-      const likeReward = calculateLikeReward(ECONOMY_CONFIG.LIKE_COST, ECONOMY_CONFIG.PLATFORM_FEE);
-      const burnedTokens = ECONOMY_CONFIG.LIKE_COST - likeReward;
-
-      await supabaseService.updateUserTokens(
-        user.address,
-        -ECONOMY_CONFIG.LIKE_COST,
-        `Like spent (author +${likeReward.toFixed(1)} S)`
-      );
-
-      setUser(prev => ({
-        ...prev,
-        tokens: prev.tokens - ECONOMY_CONFIG.LIKE_COST,
-        dailyLikeCount: prev.dailyLikeCount + 1
+      // 2. 发起链上转账给作者（100 SPARK）
+      transferSpark(post.userAddress, ECONOMY_CONFIG.LIKE_COST.toString());
+      
+      // 3. 更新本地UI
+      setPosts(prev => prev.map(p => {
+        if (p.id === postId) {
+          return {
+            ...p,
+            likes: p.likes + 1,
+            likedBy: [...p.likedBy, user.address]
+          };
+        }
+        return p;
       }));
 
-      const { data: authorData } = await supabaseService.supabase
-        .from('users')
-        .select('like_earned_today')
-        .eq('address', post.userAddress)
-        .single();
-
-      if (authorData) {
-        const authorLikeEarned = Number(authorData.like_earned_today);
-        const newAuthorLikeEarned = authorLikeEarned + likeReward;
-
-        if (newAuthorLikeEarned <= ECONOMY_CONFIG.DAILY_LIKE_EARN_LIMIT) {
-          await supabaseService.updateUserTokens(
-            post.userAddress,
-            likeReward,
-            `Like received (today ${newAuthorLikeEarned.toFixed(1)} / ${ECONOMY_CONFIG.DAILY_LIKE_EARN_LIMIT} S)`
-          );
-
-          await supabaseService.updateUserDailyStats(post.userAddress, {
-            like_earned_today: newAuthorLikeEarned
-          });
-
-          if (post.userAddress === user.address) {
-            setUser(prev => ({
-              ...prev,
-              tokens: prev.tokens + likeReward
-            }));
-            setLikeEarnedToday(newAuthorLikeEarned);
-          }
-        } else {
-          if (post.userAddress === user.address) {
-            alert(`Your daily like-earn limit reached: ${ECONOMY_CONFIG.DAILY_LIKE_EARN_LIMIT} Spark.`);
-          }
-        }
-      }
-
-      await loadPosts();
-      const updatedTransactions = await supabaseService.fetchUserTransactions(user.address);
-      setTransactions(updatedTransactions);
-
-      showToast('success', `👍 Liked! Spent ${ECONOMY_CONFIG.LIKE_COST} Spark`);
+      showToast('info', `💫 正在转账 ${ECONOMY_CONFIG.LIKE_COST} SPARK 给作者...`);
     } catch (error: any) {
       console.error('Like failed:', error);
       if (error.code === '23505') {
-        showToast('warning', 'You have already liked this post!');
+        showToast('warning', '你已经点赞过这篇帖子了！');
       } else {
-        showToast('error', 'Like failed. Please check network and try again.');
+        showToast('error', '点赞失败，请检查网络后重试。');
       }
-    } finally {
       setLoading(false);
     }
   };
+  
+  // 监听转账成功
+  useEffect(() => {
+    if (isTransferSuccess) {
+      showToast('success', `👍 点赞成功！已转账 ${ECONOMY_CONFIG.LIKE_COST} SPARK 给作者。`);
+      // 刷新余额
+      refetchSparkBalance();
+      setLoading(false);
+    }
+  }, [isTransferSuccess, refetchSparkBalance]);
+
+  const MAX_SLOTS = 2000;
+  const minted = Number(totalMintedUsers || 0);
+  const mintPercentage = (minted / MAX_SLOTS) * 100;
 
   const GuideView = () => (
     <div className="max-w-4xl mx-auto space-y-20 animate-in fade-in slide-in-from-bottom-4 duration-700 pb-20 pt-10">
@@ -349,7 +388,7 @@ const App: React.FC = () => {
           Turn your AI wisdom<br/><span className="text-indigo-600">into assets</span>
         </h1>
         <p className="text-xl text-slate-500 max-w-2xl mx-auto leading-relaxed">
-          In the AI era, knowledge is no longer static but flowing energy. AI Spark rewards everyone who shares prompts and workflows with the community.
+          AI tools are powerful, but <span className="text-slate-900 font-bold">only humans discover better ways to use them</span>. AI Spark rewards everyone who shares these irreplaceable insights with the community.
         </p>
       </section>
 
@@ -357,7 +396,7 @@ const App: React.FC = () => {
         <div className="space-y-6">
            <h2 className="text-3xl font-black text-slate-900">Why AI Spark?</h2>
            <p className="text-slate-500 leading-relaxed">
-             Today, many AI tips are scattered across chat logs and private docs. We build a transparent incentive layer: Spark tokens measure contribution so great AI practices can be reused by everyone.
+             AI can generate answers, but <span className="text-slate-900 font-bold">only human wisdom finds the right questions</span>. Today, countless valuable prompts and workflows hide in private docs. We build a transparent incentive layer: Spark tokens measure contribution so great AI practices can be reused by everyone.
            </p>
            <ul className="space-y-4">
               {[
@@ -377,17 +416,167 @@ const App: React.FC = () => {
               <p className="text-indigo-400 font-black uppercase tracking-widest text-[10px] mb-4">Current Progress</p>
               <h3 className="text-2xl font-black mb-8">V1.0 Seed Test Phase</h3>
               <div className="space-y-6">
-                 <div>
-                    <div className="flex justify-between text-xs mb-2"><span>Community contribution</span><span>64%</span></div>
+                   <div>
+                    <div className="flex justify-between text-xs mb-2">
+                      <span>Mint progress</span>
+                      <span>{minted} / {MAX_SLOTS} ({mintPercentage.toFixed(1)}%)</span>
+                    </div>
                     <div className="h-2 bg-white/10 rounded-full overflow-hidden">
-                       <div className="h-full bg-indigo-500 w-[64%]"></div>
+                       <div 
+                         className="h-full bg-indigo-500 transition-all duration-500" 
+                         style={{ width: `${mintPercentage}%` }}
+                       ></div>
                     </div>
                  </div>
-                 <p className="text-sm text-slate-400 italic">“We are looking for the first 1,000 core creators. Early participants get 2x Spark bonus.”</p>
+                 <p className="text-sm text-slate-400 italic">“We are looking for the first 2,000 core creators. Early participants get 2x Spark bonus.”</p>
               </div>
            </div>
            <Zap className="absolute -right-10 -bottom-10 text-white/5" size={200} fill="currentColor" />
         </div>
+      </section>
+
+      <section className="bg-gradient-to-br from-purple-50 via-indigo-50 to-blue-50 rounded-[3rem] p-12 border border-indigo-100 relative overflow-hidden">
+        <div className="relative z-10">
+          <div className="text-center mb-12">
+            <div className="inline-flex items-center space-x-2 bg-indigo-600 text-white px-4 py-2 rounded-full mb-6 shadow-lg">
+              <ShieldCheck size={20} />
+              <span className="text-xs font-black uppercase tracking-widest">Powered by ERC-8004</span>
+            </div>
+            <h2 className="text-4xl font-black text-slate-900 mb-4">Blockchain-Verified AI Agent</h2>
+            <p className="text-slate-600 max-w-3xl mx-auto leading-relaxed text-lg">
+              AI Spark is built on <span className="font-black text-indigo-600">ERC-8004</span>, the first official standard for decentralized AI Agent identity and reputation. This ensures every content evaluation is transparent, verifiable, and trustworthy.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
+            <div className="bg-white p-8 rounded-[2.5rem] border border-indigo-100 shadow-sm">
+              <div className="bg-indigo-50 w-14 h-14 rounded-2xl flex items-center justify-center text-indigo-600 mb-6">
+                <ShieldCheck size={28} />
+              </div>
+              <h4 className="font-black text-xl mb-3 text-slate-900">On-Chain Identity</h4>
+              <p className="text-slate-500 text-sm leading-relaxed mb-4">
+                Our AI scoring agent has a unique <span className="font-bold text-indigo-600">ERC-721 NFT identity</span> registered on Ethereum. View verifiable metadata including capabilities, version, and compliance status.
+              </p>
+              <div className="text-xs text-slate-400 bg-slate-50 p-4 rounded-xl space-y-1">
+                <div><span className="font-bold">Registry:</span> 0x8004ad19...D46C2898</div>
+                <div><span className="font-bold">Standard:</span> ERC-8004 v1.0</div>
+                <div><span className="font-bold">Status:</span> ✅ Verified</div>
+              </div>
+            </div>
+
+            <div className="bg-white p-8 rounded-[2.5rem] border border-rose-100 shadow-sm">
+              <div className="bg-rose-50 w-14 h-14 rounded-2xl flex items-center justify-center text-rose-500 mb-6">
+                <Star size={28} />
+              </div>
+              <h4 className="font-black text-xl mb-3 text-slate-900">Reputation Tracking</h4>
+              <p className="text-slate-500 text-sm leading-relaxed mb-4">
+                Agent performance is <span className="font-bold text-rose-500">permanently recorded on-chain</span> via ReputationRegistry. Every scoring task, user feedback, and quality metric builds an immutable trust score.
+              </p>
+              <div className="text-xs text-slate-400 bg-slate-50 p-4 rounded-xl space-y-1">
+                <div><span className="font-bold">Tasks Completed:</span> On-chain verified</div>
+                <div><span className="font-bold">Feedback Score:</span> Community-driven</div>
+                <div><span className="font-bold">Audit Trail:</span> 100% transparent</div>
+              </div>
+            </div>
+
+            <div className="bg-white p-8 rounded-[2.5rem] border border-emerald-100 shadow-sm">
+              <div className="bg-emerald-50 w-14 h-14 rounded-2xl flex items-center justify-center text-emerald-600 mb-6">
+                <Target size={28} />
+              </div>
+              <h4 className="font-black text-xl mb-3 text-slate-900">Validation Proof</h4>
+              <p className="text-slate-500 text-sm leading-relaxed mb-4">
+                Independent validators can <span className="font-bold text-emerald-600">audit agent outputs</span> through ValidationRegistry, creating a decentralized trust layer that no single party controls.
+              </p>
+              <div className="text-xs text-slate-400 bg-slate-50 p-4 rounded-xl space-y-1">
+                <div><span className="font-bold">Validation:</span> Multi-party consensus</div>
+                <div><span className="font-bold">Audit Access:</span> Public & open</div>
+                <div><span className="font-bold">Trust Model:</span> Decentralized</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white/80 backdrop-blur rounded-[2.5rem] p-8 border border-indigo-100">
+            <h3 className="text-2xl font-black text-slate-900 mb-4 flex items-center">
+              <Lightbulb className="mr-3 text-indigo-600" size={24} />
+              Why ERC-8004 Matters for AI Spark
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+              <div className="space-y-3">
+                <div className="flex items-start space-x-3">
+                  <div className="bg-indigo-100 p-1.5 rounded-lg mt-0.5">
+                    <ShieldCheck className="text-indigo-600" size={14} />
+                  </div>
+                  <div>
+                    <h5 className="font-black text-slate-900 mb-1">Transparent Scoring</h5>
+                    <p className="text-slate-600 leading-relaxed">
+                      Every post evaluation by our AI agent is linked to its verified on-chain identity, eliminating black-box algorithms.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-start space-x-3">
+                  <div className="bg-rose-100 p-1.5 rounded-lg mt-0.5">
+                    <Star className="text-rose-500" size={14} />
+                  </div>
+                  <div>
+                    <h5 className="font-black text-slate-900 mb-1">Community Trust</h5>
+                    <p className="text-slate-600 leading-relaxed">
+                      Agent reputation grows with successful evaluations. Poor performance is visible to all, maintaining high quality standards.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-start space-x-3">
+                  <div className="bg-emerald-100 p-1.5 rounded-lg mt-0.5">
+                    <Target className="text-emerald-600" size={14} />
+                  </div>
+                  <div>
+                    <h5 className="font-black text-slate-900 mb-1">Fair Rewards</h5>
+                    <p className="text-slate-600 leading-relaxed">
+                      Spark token distribution based on verified agent scores ensures creators are rewarded fairly for quality content.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-start space-x-3">
+                  <div className="bg-purple-100 p-1.5 rounded-lg mt-0.5">
+                    <Sparkles className="text-purple-600" size={14} />
+                  </div>
+                  <div>
+                    <h5 className="font-black text-slate-900 mb-1">Future-Ready</h5>
+                    <p className="text-slate-600 leading-relaxed">
+                      ERC-8004 compliance allows integration with other AI agents, creating an ecosystem of verified, interoperable agents.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-8 pt-6 border-t border-slate-100 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex flex-wrap gap-2 text-xs">
+                <span className="bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-full font-bold border border-indigo-100">
+                  Identity Registry: 0x8004ad19...
+                </span>
+                <span className="bg-rose-50 text-rose-600 px-3 py-1.5 rounded-full font-bold border border-rose-100">
+                  Reputation Registry: 0x8004B12F...
+                </span>
+                <span className="bg-emerald-50 text-emerald-600 px-3 py-1.5 rounded-full font-bold border border-emerald-100">
+                  Validation Registry: 0x8004C11C...
+                </span>
+              </div>
+              <a 
+                href="https://www.8004scan.io" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="flex items-center space-x-2 bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-black hover:bg-indigo-700 transition-all shadow-lg"
+              >
+                <span>Explore on 8004scan</span>
+                <ArrowRight size={16} />
+              </a>
+            </div>
+          </div>
+        </div>
+        <div className="absolute -top-20 -left-20 w-64 h-64 bg-purple-200/20 rounded-full blur-3xl"></div>
+        <div className="absolute -bottom-20 -right-20 w-64 h-64 bg-blue-200/20 rounded-full blur-3xl"></div>
       </section>
 
       <section>
@@ -434,27 +623,27 @@ const App: React.FC = () => {
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
             <div className="bg-white/70 backdrop-blur p-6 rounded-2xl">
-              <div className="font-black text-slate-900 mb-2">💰 Like cost</div>
+              <div className="font-black text-slate-900 mb-2">💰 Like mechanism</div>
               <p className="text-slate-600 leading-relaxed">
-                Liking costs 1 Spark: 0.9 to author, 0.1 burned. Deflationary, no unlimited mint.
+                Liking costs 100 Spark: 90 to author, 10 as platform fee. High-value content gets real rewards.
               </p>
             </div>
             <div className="bg-white/70 backdrop-blur p-6 rounded-2xl">
-              <div className="font-black text-slate-900 mb-2">📈 Daily caps</div>
+              <div className="font-black text-slate-900 mb-2">🎯 How to get tokens</div>
               <p className="text-slate-600 leading-relaxed">
-                First 3 posts/day get higher reward (10 S), then 3 S. Like earnings cap at 50 S/day.
+                Mint (top 2000), Weekly ranking (top 10), or get likes from others. No initial airdrop.
               </p>
             </div>
             <div className="bg-white/70 backdrop-blur p-6 rounded-2xl">
-              <div className="font-black text-slate-900 mb-2">🔄 Token flow</div>
+              <div className="font-black text-slate-900 mb-2">🔄 Token circulation</div>
               <p className="text-slate-600 leading-relaxed">
-                Post → earn → spend on likes → author earns → more creation. Value flows to good content.
+                Mint/Win → spend on likes → authors earn → more creation. Value flows to quality content.
               </p>
             </div>
             <div className="bg-white/70 backdrop-blur p-6 rounded-2xl">
-              <div className="font-black text-slate-900 mb-2">🎁 Initial tokens</div>
+              <div className="font-black text-slate-900 mb-2">🏆 Earn from quality</div>
               <p className="text-slate-600 leading-relaxed">
-                Connect wallet to get 20 Spark to try likes and posts.
+                Create great content → get likes (90 S each) → rank weekly (up to 10000 S) → sustainable income.
               </p>
             </div>
           </div>
@@ -516,7 +705,7 @@ const App: React.FC = () => {
               <div onClick={() => setActiveTab('profile')} className="flex items-center space-x-3 bg-slate-50 border border-slate-100 p-1.5 pr-4 rounded-full cursor-pointer hover:border-indigo-200 transition-colors">
                 <img src={getAvatarUrl(user.address!)} className="w-8 h-8 rounded-full border border-white" />
                 <div>
-                  <div className="text-[10px] font-black text-indigo-600 leading-none mb-1">{user.tokens} SPARK</div>
+                  <div className="text-[10px] font-black text-indigo-600 leading-none mb-1">⚡ {sparkBalance.toFixed(0)} SPARK</div>
                   <div className="text-[10px] font-mono text-slate-400 leading-none">{truncateAddress(user.address!)}</div>
                 </div>
               </div>
@@ -547,7 +736,7 @@ const App: React.FC = () => {
          {user.isConnected ? (
             <div onClick={() => setActiveTab('profile')} className="flex items-center space-x-2 bg-indigo-50 px-3 py-1.5 rounded-full border border-indigo-100">
                <Coins size={14} className="text-indigo-600" />
-               <span className="text-xs font-black text-indigo-600">{user.tokens}</span>
+               <span className="text-xs font-black text-indigo-600">{sparkBalance.toFixed(0)} SPARK</span>
             </div>
          ) : (
            <button 
@@ -576,7 +765,7 @@ const App: React.FC = () => {
                     Every AI insight<br/>deserves to be <span className="text-indigo-600 italic">“mined”</span>
                   </h2>
                   <p className="text-slate-500 text-lg leading-relaxed mb-8 max-w-xl">
-                    On AI Spark, sharing knowledge helps others and builds your digital assets. Connect wallet and start your AI creator journey.
+                    <span className="text-slate-900 font-bold">Only humans can turn AI into real-world magic.</span> On AI Spark, share your unique insights, help others, and build digital assets. Connect wallet and start your AI creator journey.
                   </p>
                   <div className="flex flex-wrap gap-4">
                     <button 
@@ -596,15 +785,15 @@ const App: React.FC = () => {
                   <div className="bg-slate-50/50 p-6 rounded-[2rem] border border-slate-100 flex items-start space-x-4">
                     <div className="bg-white p-3 rounded-2xl shadow-sm text-indigo-600"><Lightbulb size={24} /></div>
                     <div>
-                      <h4 className="font-black text-slate-900">Capture ideas</h4>
-                      <p className="text-sm text-slate-400 mt-1">Record any moment AI changed your life</p>
+                      <h4 className="font-black text-slate-900">Human insights matter</h4>
+                      <p className="text-sm text-slate-400 mt-1">Your unique AI discoveries that machines can't create</p>
                     </div>
                   </div>
                   <div className="bg-slate-50/50 p-6 rounded-[2rem] border border-slate-100 flex items-start space-x-4">
                     <div className="bg-white p-3 rounded-2xl shadow-sm text-rose-500"><Gem size={24} /></div>
                     <div>
                       <h4 className="font-black text-slate-900">Earn Spark</h4>
-                      <p className="text-sm text-slate-400 mt-1">Post to earn 10 Spark, unlimited likes</p>
+                      <p className="text-sm text-slate-400 mt-1">Mint, win rankings, or get likes on your posts</p>
                     </div>
                   </div>
                   <div className="bg-slate-50/50 p-6 rounded-[2rem] border border-slate-100 flex items-start space-x-4">
@@ -618,6 +807,90 @@ const App: React.FC = () => {
               </div>
               <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-50/30 rounded-full blur-3xl -mr-20 -mt-20"></div>
             </div>
+
+            {/* ERC-8004 Protocol Badge Section */}
+            <div className="bg-gradient-to-br from-purple-50 via-indigo-50 to-blue-50 rounded-[3rem] p-8 md:p-12 border border-indigo-100 shadow-lg relative overflow-hidden">
+              <div className="relative z-10">
+                <div className="flex items-center justify-between flex-wrap gap-4 mb-6">
+                  <div className="flex items-center space-x-3">
+                    <div className="bg-indigo-600 p-2.5 rounded-xl shadow-lg">
+                      <ShieldCheck className="text-white" size={24} />
+                    </div>
+                    <div>
+                      <h3 className="text-2xl font-black text-slate-900">ERC-8004 Certified</h3>
+                      <p className="text-sm text-indigo-600 font-bold">Official AI Agent Protocol Standard</p>
+                    </div>
+                  </div>
+                  <a 
+                    href="https://www.8004scan.io" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="flex items-center space-x-2 bg-white px-5 py-2.5 rounded-xl text-sm font-black text-indigo-600 hover:shadow-md transition-all border border-indigo-100"
+                  >
+                    <span>View on 8004scan</span>
+                    <ArrowRight size={16} />
+                  </a>
+                </div>
+                
+                <p className="text-slate-600 leading-relaxed mb-6 max-w-3xl">
+                  AI Spark integrates <span className="font-black text-indigo-600">ERC-8004</span>, the first standardized protocol for AI Agent identity, reputation, and validation on blockchain. Our AI scoring agent is officially registered and verified, ensuring transparent, trustworthy content evaluation.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-white/70 backdrop-blur p-5 rounded-2xl border border-indigo-100">
+                    <div className="flex items-center space-x-2 mb-3">
+                      <div className="w-8 h-8 bg-indigo-100 rounded-lg flex items-center justify-center">
+                        <ShieldCheck className="text-indigo-600" size={16} />
+                      </div>
+                      <h4 className="font-black text-slate-900 text-sm">Identity Registry</h4>
+                    </div>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Each AI agent gets a unique on-chain identity (ERC-721 NFT) with verifiable metadata and capabilities
+                    </p>
+                  </div>
+
+                  <div className="bg-white/70 backdrop-blur p-5 rounded-2xl border border-indigo-100">
+                    <div className="flex items-center space-x-2 mb-3">
+                      <div className="w-8 h-8 bg-rose-100 rounded-lg flex items-center justify-center">
+                        <Star className="text-rose-500" size={16} />
+                      </div>
+                      <h4 className="font-black text-slate-900 text-sm">Reputation System</h4>
+                    </div>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Track agent performance with on-chain reputation scores based on task completion and user feedback
+                    </p>
+                  </div>
+
+                  <div className="bg-white/70 backdrop-blur p-5 rounded-2xl border border-indigo-100">
+                    <div className="flex items-center space-x-2 mb-3">
+                      <div className="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center">
+                        <Target className="text-emerald-600" size={16} />
+                      </div>
+                      <h4 className="font-black text-slate-900 text-sm">Validation Proof</h4>
+                    </div>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Independent validators audit and verify agent outputs, creating an immutable trust layer
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex flex-wrap gap-3 text-xs">
+                  <span className="bg-white px-4 py-2 rounded-full font-bold text-slate-600 border border-slate-200">
+                    📖 Standard: ERC-8004
+                  </span>
+                  <span className="bg-white px-4 py-2 rounded-full font-bold text-slate-600 border border-slate-200">
+                    ⛓️ Network: Ethereum Mainnet
+                  </span>
+                  <span className="bg-white px-4 py-2 rounded-full font-bold text-slate-600 border border-slate-200">
+                    ✅ Status: Verified
+                  </span>
+                </div>
+              </div>
+              <div className="absolute -bottom-10 -right-10 w-48 h-48 bg-indigo-200/20 rounded-full blur-3xl"></div>
+            </div>
+
+            {/* Mint Progress Bar */}
+            <MintProgressBar variant="compact" />
             
             {/* Compact Feed Section */}
             <div>
@@ -634,7 +907,12 @@ const App: React.FC = () => {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {posts.map(post => (
-                  <PostCard key={post.id} post={post} onLike={handleLike} />
+                  <PostCard 
+                    key={post.id} 
+                    post={post} 
+                    onLike={handleLike}
+                    onClick={() => setSelectedPost(post)}
+                  />
                 ))}
               </div>
               
@@ -657,6 +935,8 @@ const App: React.FC = () => {
                 if (address) {
                   const fetchedUser = await supabaseService.getOrCreateUser(address);
                   setUser(fetchedUser);
+                  // Refetch on-chain balance after mint
+                  refetchSparkBalance();
                 }
               }}
             />
@@ -681,6 +961,8 @@ const App: React.FC = () => {
                 if (address) {
                   const fetchedUser = await supabaseService.getOrCreateUser(address);
                   setUser(fetchedUser);
+                  // Refetch on-chain balance after claiming reward
+                  refetchSparkBalance();
                 }
               }}
             />
@@ -700,39 +982,22 @@ const App: React.FC = () => {
               <div className="bg-white rounded-[2.5rem] p-10 border border-slate-100 shadow-sm text-center">
                 <img src={getAvatarUrl(user.address!)} className="w-24 h-24 rounded-3xl mx-auto mb-6 border-4 border-slate-50 shadow-sm" />
                 <p className="font-mono text-sm text-slate-400 mb-1">{truncateAddress(user.address!)}</p>
-                <h3 className="text-4xl font-black text-slate-900 mb-8">{user.tokens.toFixed(1)} <span className="text-lg text-indigo-600">Spark</span></h3>
+                <h3 className="text-4xl font-black text-slate-900 mb-8">{sparkBalance.toFixed(0)} <span className="text-lg text-indigo-600">Spark</span></h3>
                 
                 <div className="flex flex-col space-y-3 mb-6">
                    <div className="flex justify-between p-4 bg-indigo-50 rounded-2xl items-center">
-                      <span className="text-xs font-bold text-indigo-600">Posts today</span>
+                      <span className="text-xs font-bold text-indigo-600">今日发帖数</span>
                       <span className="font-black text-indigo-600">{user.dailyPostCount} / {ECONOMY_CONFIG.DAILY_POST_LIMIT}+</span>
                    </div>
-                   <div className="flex justify-between p-4 bg-rose-50 rounded-2xl items-center">
-                      <span className="text-xs font-bold text-rose-500">Like earnings today</span>
-                      <span className="font-black text-rose-500">{likeEarnedToday.toFixed(1)} / {ECONOMY_CONFIG.DAILY_LIKE_EARN_LIMIT} S</span>
+                   <div className="flex justify-between p-4 bg-purple-50 rounded-2xl items-center">
+                      <span className="text-xs font-bold text-purple-600">链上 SPARK 余额</span>
+                      <span className="font-black text-purple-600">{sparkBalance.toFixed(0)} SPARK</span>
                    </div>
-                   <div className="flex justify-between p-4 bg-slate-50 rounded-2xl items-center">
-                      <span className="text-xs font-bold text-slate-500">Total balance</span>
-                      <span className="font-black">{user.tokens.toFixed(1)} S</span>
+                   <div className="flex justify-between p-4 bg-emerald-50 rounded-2xl items-center">
+                      <span className="text-xs font-bold text-emerald-600">链上 USDT 余额</span>
+                      <span className="font-black text-emerald-600">{usdtBalance.toFixed(2)} USDT</span>
                    </div>
                 </div>
-                
-                {/* Transactions */}
-                {transactions.length > 0 && (
-                  <div className="mt-6 text-left">
-                    <h4 className="text-xs font-black text-slate-400 mb-3 uppercase tracking-widest">Recent transactions</h4>
-                    <div className="space-y-2 max-h-48 overflow-y-auto">
-                      {transactions.slice(0, 5).map(tx => (
-                        <div key={tx.id} className="flex justify-between items-center p-3 bg-slate-50 rounded-xl text-xs">
-                          <span className="text-slate-600">{tx.reason}</span>
-                          <span className={`font-black ${tx.amount > 0 ? 'text-emerald-600' : 'text-rose-500'}`}>
-                            {tx.amount > 0 ? '+' : ''}{tx.amount.toFixed(1)} S
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
                 
                 {/* Quick links */}
                 <div className="grid grid-cols-2 gap-3 mt-6 pt-6 border-t border-slate-100">
@@ -741,14 +1006,14 @@ const App: React.FC = () => {
                     className="flex flex-col items-center justify-center p-4 bg-gradient-to-br from-purple-50 to-pink-50 rounded-2xl border border-purple-100 hover:scale-105 transition-all"
                   >
                     <Gem className="text-purple-600 mb-2" size={24} />
-                    <span className="text-xs font-bold text-purple-600">会员中心</span>
+                    <span className="text-xs font-bold text-purple-600">Membership</span>
                   </button>
                   <button
                     onClick={() => setActiveTab('guide')}
                     className="flex flex-col items-center justify-center p-4 bg-gradient-to-br from-indigo-50 to-blue-50 rounded-2xl border border-indigo-100 hover:scale-105 transition-all"
                   >
                     <BookOpen className="text-indigo-600 mb-2" size={24} />
-                    <span className="text-xs font-bold text-indigo-600">深度指南</span>
+                    <span className="text-xs font-bold text-indigo-600">Guide</span>
                   </button>
                 </div>
                 
@@ -757,7 +1022,7 @@ const App: React.FC = () => {
                   className="flex items-center justify-center space-x-2 text-slate-400 text-xs font-bold pt-6 w-full hover:text-slate-600 transition-colors" 
                   disabled={loading}
                 >
-                  <LogOut size={14} /> <span>断开连接</span>
+                  <LogOut size={14} /> <span>Disconnect</span>
                 </button>
               </div>
             )}
@@ -765,7 +1030,7 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* 移动端底部导航 (Mobile Only) */}
+      {/* Mobile bottom navigation (Mobile Only) */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-xl border-t border-slate-100 px-4 py-4 pb-safe z-50">
         <div className="flex justify-between items-center h-10">
           <button onClick={() => setActiveTab('home')} className={activeTab === 'home' ? 'text-indigo-600' : 'text-slate-300'}><Home size={22} /></button>
@@ -782,11 +1047,11 @@ const App: React.FC = () => {
         </div>
       </nav>
 
-      {/* 钱包选择弹窗 */}
+      {/* Wallet selection modal */}
       {showWalletModal && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[200] flex items-center justify-center p-4 animate-in fade-in duration-200" onClick={() => setShowWalletModal(false)}>
           <div className="bg-white rounded-[2.5rem] p-8 max-w-md w-full shadow-2xl animate-in slide-in-from-bottom-4 duration-300" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-2xl font-black text-slate-900 mb-6">选择钱包</h3>
+            <h3 className="text-2xl font-black text-slate-900 mb-6">Select Wallet</h3>
             <div className="space-y-3">
               {connectors.map((connector, index) => (
                 <button
@@ -809,7 +1074,7 @@ const App: React.FC = () => {
               onClick={() => setShowWalletModal(false)}
               className="w-full mt-6 text-slate-400 text-sm font-bold py-3 hover:text-slate-600 transition-colors"
             >
-              取消
+              Cancel
             </button>
           </div>
         </div>
@@ -823,12 +1088,21 @@ const App: React.FC = () => {
         />
       )}
       
-      {/* Toast 通知 */}
+      {/* Toast notification */}
       {toast && (
         <Toast
           type={toast.type}
           message={toast.message}
           onClose={hideToast}
+        />
+      )}
+
+      {/* Post detail modal */}
+      {selectedPost && (
+        <PostDetailModal
+          post={selectedPost}
+          onClose={() => setSelectedPost(null)}
+          onLike={handleLike}
         />
       )}
     </div>

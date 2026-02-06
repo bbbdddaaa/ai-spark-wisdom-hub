@@ -7,18 +7,18 @@ export const COLORS = {
   warning: '#f59e0b',
 };
 
-// Economy config (blockchain version)
+// Economy config (blockchain version - 完全基于链上SPARK代币)
 export const ECONOMY_CONFIG = {
-  INITIAL_TOKENS: 20,
-  POST_REWARD_BASE: 10,
-  POST_REWARD_REDUCED: 3,
+  INITIAL_TOKENS: 20, // 已废弃 - 不再使用数据库积分
+  POST_REWARD_BASE: 10, // 已废弃 - 发帖奖励通过后端API直接在链上发放
+  POST_REWARD_REDUCED: 3, // 已废弃
   DAILY_POST_LIMIT: 3,
-  DAILY_LIKE_EARN_LIMIT: 50,
-  LIKE_COST: 1,
-  PLATFORM_FEE: 0.1,
+  DAILY_LIKE_EARN_LIMIT: 50, // 已废弃 - 链上转账无上限
+  LIKE_COST: 100, // 点赞成本：100 SPARK（直接在链上转账给作者）
+  PLATFORM_FEE: 0.1, // 已废弃 - 链上点赞直接转账，暂无平台手续费
   FEATURED_REWARD: 100,
   
-  MINT_COST_USDT: 10,
+  MINT_COST_ETH: 0.003,
   MINT_REWARD_SPARK: 10000,
   MINT_ELIGIBLE_USERS: 2000,
   

@@ -2,6 +2,8 @@ import { supabase as supabaseClient, DbUser, DbPost, DbLike, DbTransaction } fro
 import { Post, User, TokenTransaction } from '../types';
 import { ECONOMY_CONFIG, getTodayString } from '../constants';
 import { validatePostData } from '../lib/security';
+import { scorePost } from './agentScoringService';
+import { categorizePost } from './postCategorizationService';
 
 // 导出supabase实例供直接使用
 export const supabase = supabaseClient;
@@ -9,7 +11,7 @@ export const supabase = supabaseClient;
 // 检查Supabase是否配置
 const ensureSupabase = () => {
   if (!supabaseClient) {
-    throw new Error('Supabase未配置。请在Vercel设置环境变量：VITE_SUPABASE_URL 和 VITE_SUPABASE_ANON_KEY');
+    throw new Error('Supabase is not configured. Please set environment variables in Vercel: VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY');
   }
   return supabaseClient;
 };
@@ -150,7 +152,7 @@ export const updateUserDailyStats = async (
 // ==================== 帖子相关操作 ====================
 
 /**
- * 获取所有帖子
+ * 获取所有帖子（优化版：一次性获取所有点赞数据）
  */
 export const fetchPosts = async (): Promise<Post[]> => {
   if (!supabaseClient) {
@@ -168,44 +170,89 @@ export const fetchPosts = async (): Promise<Post[]> => {
     throw error;
   }
 
-  // 获取每个帖子的点赞用户列表
-  const postsWithLikes = await Promise.all(
-    posts.map(async (post) => {
-      const likedBy = await getPostLikedBy(post.id);
-      return dbPostToPost(post, likedBy);
-    })
-  );
+  // 优化：一次性获取所有帖子的点赞数据，避免N+1查询问题
+  const postIds = posts.map(p => p.id);
+  const { data: allLikes, error: likesError } = await supabaseClient
+    .from('likes')
+    .select('post_id, user_address')
+    .in('post_id', postIds);
+  
+  if (likesError) {
+    console.error('获取点赞数据失败:', likesError);
+    // 如果获取点赞失败，仍然返回帖子数据，只是没有点赞信息
+  }
+
+  // 将点赞数据按 post_id 分组
+  const likesByPostId: Record<string, string[]> = {};
+  (allLikes || []).forEach(like => {
+    if (!likesByPostId[like.post_id]) {
+      likesByPostId[like.post_id] = [];
+    }
+    likesByPostId[like.post_id].push(like.user_address);
+  });
+
+  // 构建帖子列表（不再需要异步查询）
+  const postsWithLikes = posts.map(post => {
+    const likedBy = likesByPostId[post.id] || [];
+    return dbPostToPost(post, likedBy);
+  });
 
   return postsWithLikes;
 };
 
 /**
- * 创建新帖子（包含安全验证）
+ * 创建新帖子（前端已评分，后端直接使用结果）
  */
 export const createPost = async (
   userAddress: string,
   title: string,
   content: string,
-  tags: string[]
+  tags: string[],
+  scoringResult?: { relevance: number; quality: number; value: number; total: number; details: string; isPassing: boolean },
+  categorizationResult?: { primary: string; secondary: string | null }
 ): Promise<Post> => {
-  // 服务端安全验证（双重保护）
+  // 1. 服务端安全验证（双重保护）
   const validation = validatePostData(title, content, tags);
   
   if (!validation.isValid) {
-    console.error('帖子验证失败:', validation.errors);
+    console.error('Post validation failed:', validation.errors);
     throw new Error('Validation failed: ' + validation.errors.join(', '));
   }
   
-  // 使用清理后的数据
+  // Use sanitized data
   const sanitizedData = validation.sanitizedData!;
   
+  // 2. 使用前端传来的评分结果，或者重新评分（兜底）
+  let finalScoringResult = scoringResult;
+  let finalCategorizationResult = categorizationResult;
+  
+  if (!finalScoringResult || !finalCategorizationResult) {
+    console.log('⚠️ 前端未提供评分结果，后端重新评分');
+    finalScoringResult = await scorePost(sanitizedData.title, sanitizedData.content);
+    finalCategorizationResult = await categorizePost(sanitizedData.title, sanitizedData.content);
+  }
+  
+  // 3. Check if scoring passes
+  if (!finalScoringResult.isPassing) {
+    throw new Error(`Post scoring did not meet requirements (${finalScoringResult.total}/100 points, minimum 60 points required).\nScoring details: ${finalScoringResult.details}`);
+  }
+  
+  // 4. 存储帖子到数据库
   const { data: post, error } = await supabaseClient
     .from('posts')
     .insert({
       user_address: userAddress,
       title: sanitizedData.title,
       content: sanitizedData.content,
-      tags: sanitizedData.tags
+      tags: sanitizedData.tags,
+      ai_score_relevance: finalScoringResult.relevance,
+      ai_score_quality: finalScoringResult.quality,
+      ai_score_value: finalScoringResult.value,
+      ai_score_total: finalScoringResult.total,
+      ai_score_details: finalScoringResult.details,
+      category: finalCategorizationResult.primary,
+      secondary_category: finalCategorizationResult.secondary,
+      scored_at: new Date().toISOString()
     })
     .select()
     .single();
@@ -213,6 +260,44 @@ export const createPost = async (
   if (error) {
     console.error('创建帖子失败:', error);
     throw error;
+  }
+
+  // 5. 可选：记录评分日志
+  await createScoringLog(post.id, userAddress, finalScoringResult, finalCategorizationResult);
+
+  // 6. 发布成功后，查询用户帖子数并授予mint资格
+  const { count: postCount, error: countError } = await supabaseClient
+    .from('posts')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_address', userAddress);
+  
+  if (!countError && postCount === 1) {
+    // 第一篇帖子，调用后端API授予mint资格（异步执行，不阻塞返回）
+    console.log(`🎉 用户 ${userAddress} 发布第一篇帖子，准备授予mint资格`);
+    
+    // 调用后端API
+    const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3100';
+    fetch(`${API_URL}/api/grant-eligibility`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ address: userAddress }),
+    })
+      .then((response) => response.json())
+      .then((result) => {
+        if (result.success) {
+          console.log(`✅ 成功授予mint资格: ${userAddress}`);
+          if (result.txHash) {
+            console.log(`   交易哈希: ${result.txHash}`);
+          }
+        } else {
+          console.error(`❌ 授予mint资格失败: ${userAddress}`, result.error);
+        }
+      })
+      .catch((error) => {
+        console.error(`❌ 授予mint资格API调用失败: ${userAddress}`, error);
+      });
   }
 
   return dbPostToPost(post, []);
@@ -330,7 +415,17 @@ const dbPostToPost = (dbPost: DbPost, likedBy: string[]): Post => ({
   timestamp: new Date(dbPost.created_at).getTime(),
   likes: dbPost.likes,
   tags: dbPost.tags || [],
-  likedBy
+  likedBy,
+  aiScore: dbPost.ai_score_total ? {
+    relevance: dbPost.ai_score_relevance || 0,
+    quality: dbPost.ai_score_quality || 0,
+    value: dbPost.ai_score_value || 0,
+    total: dbPost.ai_score_total || 0,
+    details: dbPost.ai_score_details || ''
+  } : undefined,
+  category: dbPost.category || undefined,
+  secondaryCategory: dbPost.secondary_category || undefined,
+  scoredAt: dbPost.scored_at ? new Date(dbPost.scored_at).getTime() : undefined
 });
 
 const dbTransactionToTransaction = (dbTx: DbTransaction): TokenTransaction => ({
@@ -339,6 +434,34 @@ const dbTransactionToTransaction = (dbTx: DbTransaction): TokenTransaction => ({
   reason: dbTx.reason,
   timestamp: new Date(dbTx.created_at).getTime()
 });
+
+/**
+ * 创建评分日志
+ */
+const createScoringLog = async (
+  postId: string,
+  agentAddress: string,
+  scoringResult: any,
+  categorizationResult: any
+): Promise<void> => {
+  try {
+    await supabaseClient
+      .from('post_scoring_logs')
+      .insert({
+        post_id: postId,
+        agent_address: agentAddress,
+        score_relevance: scoringResult.relevance,
+        score_quality: scoringResult.quality,
+        score_value: scoringResult.value,
+        score_total: scoringResult.total,
+        category: categorizationResult.primary,
+        secondary_category: categorizationResult.secondary
+      });
+  } catch (error) {
+    // 评分日志失败不影响帖子发布
+    console.warn('创建评分日志失败:', error);
+  }
+};
 
 // ==================== 实时订阅 ====================
 
@@ -367,7 +490,7 @@ export const subscribeToPosts = (callback: (post: Post) => void) => {
 /**
  * 订阅点赞变化
  */
-export const subscribeToLikes = (callback: (like: DbLike) => void) => {
+export const subscribeToLikes = (callback: (like: { post_id: string; user_address: string }) => void) => {
   if (!supabaseClient) {
     // 返回一个空的订阅对象
     return { unsubscribe: () => {} };
@@ -378,7 +501,11 @@ export const subscribeToLikes = (callback: (like: DbLike) => void) => {
     .on('postgres_changes',
       { event: 'INSERT', schema: 'public', table: 'likes' },
       (payload) => {
-        callback(payload.new as DbLike);
+        const like = payload.new as DbLike;
+        callback({
+          post_id: like.post_id,
+          user_address: like.user_address
+        });
       }
     )
     .subscribe();

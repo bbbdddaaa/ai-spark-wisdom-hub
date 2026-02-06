@@ -4,7 +4,18 @@ const { ethers } = hre;
 async function main() {
   console.log("Deploying contracts...");
   
-  const [deployer] = await ethers.getSigners();
+  const signers = await ethers.getSigners();
+  
+  if (signers.length === 0) {
+    throw new Error("No accounts available. Please check your PRIVATE_KEY in .env.local");
+  }
+  
+  const deployer = signers[0];
+  
+  if (!deployer) {
+    throw new Error("Deployer account is undefined. Please check your PRIVATE_KEY in .env.local");
+  }
+  
   console.log("Deployer:", deployer.address);
   console.log("Balance:", ethers.formatEther(await ethers.provider.getBalance(deployer.address)));
   
@@ -41,7 +52,6 @@ async function main() {
   const MintController = await ethers.getContractFactory("MintController");
   const mintController = await MintController.deploy(
     sparkTokenAddress,
-    usdtAddress,
     deployer.address
   );
   await mintController.waitForDeployment();
@@ -88,7 +98,7 @@ async function main() {
     console.log("\nVerify contracts manually after confirmation:");
     console.log(`npx hardhat verify --network ${network.name} ${sparkTokenAddress}`);
     console.log(`npx hardhat verify --network ${network.name} ${rewardPoolAddress} ${sparkTokenAddress} ${usdtAddress}`);
-    console.log(`npx hardhat verify --network ${network.name} ${mintControllerAddress} ${sparkTokenAddress} ${usdtAddress} ${deployer.address}`);
+    console.log(`npx hardhat verify --network ${network.name} ${mintControllerAddress} ${sparkTokenAddress} ${deployer.address}`);
     console.log(`npx hardhat verify --network ${network.name} ${membershipManagerAddress} ${usdtAddress} ${rewardPoolAddress}`);
   }
 }

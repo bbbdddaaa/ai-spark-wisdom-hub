@@ -21,6 +21,16 @@ export interface Post {
   likes: number;
   tags: string[];
   likedBy: string[]; // 记录哪些地址点赞过
+  aiScore?: {
+    relevance: number;
+    quality: number;
+    value: number;
+    total: number;
+    details: string;
+  };
+  category?: string;
+  secondaryCategory?: string;
+  scoredAt?: number;
 }
 
 export interface TokenTransaction {

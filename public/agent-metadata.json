@@ -1,0 +1,158 @@
+{
+  "name": "AI Spark Post Scoring Agent",
+  "description": "Official AI Agent for evaluating post quality on AI Spark platform. Uses advanced language models to assess AI relevance, content quality, and educational value.",
+  "version": "1.0.0",
+  "image": "https://aispark.space/spark-icon.png",
+  "attributes": [
+    {
+      "trait_type": "Agent Type",
+      "value": "Content Scoring"
+    },
+    {
+      "trait_type": "Model",
+      "value": "Gemini 3 Flash Preview"
+    },
+    {
+      "trait_type": "Capabilities",
+      "value": "Multi-dimensional Scoring"
+    },
+    {
+      "trait_type": "Status",
+      "value": "Active"
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "content-scoring",
+      "description": "Evaluates post quality across multiple dimensions",
+      "version": "1.0.0"
+    },
+    {
+      "name": "categorization",
+      "description": "Automatically categorizes posts into predefined categories",
+      "version": "1.0.0"
+    },
+    {
+      "name": "quality-assessment",
+      "description": "Assesses educational and practical value of content",
+      "version": "1.0.0"
+    }
+  ],
+  "scoring_criteria": {
+    "relevance": {
+      "weight": 0.35,
+      "max_score": 35,
+      "description": "Content relevance to AI topics",
+      "levels": {
+        "excellent": "31-35: Highly relevant AI content with specific technical discussions",
+        "good": "21-30: Strong AI relevance with clear topic focus",
+        "fair": "11-20: Partially relevant with some AI-related content",
+        "poor": "0-10: Minimal or no AI relevance"
+      }
+    },
+    "quality": {
+      "weight": 0.35,
+      "max_score": 35,
+      "description": "Overall content quality and clarity",
+      "levels": {
+        "excellent": "31-35: Clear logic, accurate expression, complete structure",
+        "good": "21-30: Good quality with minor issues",
+        "fair": "11-20: Average quality with some flaws",
+        "poor": "0-10: Poor quality with significant issues"
+      }
+    },
+    "value": {
+      "weight": 0.30,
+      "max_score": 30,
+      "description": "Educational and practical value for readers",
+      "levels": {
+        "high": "21-30: High value with actionable insights",
+        "medium": "11-20: Moderate value with some useful information",
+        "low": "0-10: Limited value or usefulness"
+      }
+    }
+  },
+  "categories": [
+    {
+      "id": "tech",
+      "name": "Technical Tutorial",
+      "description": "AI technology, algorithms, code implementation",
+      "icon": "💻",
+      "color": "#3b82f6"
+    },
+    {
+      "id": "product",
+      "name": "Product Experience",
+      "description": "AI product reviews and usage insights",
+      "icon": "📱",
+      "color": "#8b5cf6"
+    },
+    {
+      "id": "theory",
+      "name": "Research Theory",
+      "description": "Academic papers and research sharing",
+      "icon": "📚",
+      "color": "#06b6d4"
+    },
+    {
+      "id": "industry",
+      "name": "Industry News",
+      "description": "AI news and trend analysis",
+      "icon": "📰",
+      "color": "#f59e0b"
+    },
+    {
+      "id": "case",
+      "name": "Application Case",
+      "description": "Practical experience and project cases",
+      "icon": "🚀",
+      "color": "#10b981"
+    },
+    {
+      "id": "thinking",
+      "name": "Thoughts & Insights",
+      "description": "Personal insights and reflections",
+      "icon": "💭",
+      "color": "#ec4899"
+    }
+  ],
+  "thresholds": {
+    "min_passing_score": 60,
+    "max_score": 100,
+    "recommended_score": 70,
+    "excellent_score": 85
+  },
+  "model_config": {
+    "provider": "Google Gemini",
+    "model": "gemini-3-flash-preview",
+    "temperature": 0.3,
+    "response_format": "structured_json"
+  },
+  "endpoints": {
+    "scoring": {
+      "url": "https://aispark.space/api/score",
+      "method": "POST",
+      "authentication": "api_key"
+    },
+    "categorization": {
+      "url": "https://aispark.space/api/categorize",
+      "method": "POST",
+      "authentication": "api_key"
+    }
+  },
+  "compliance": {
+    "standard": "ERC-8004",
+    "version": "1.0",
+    "verified": true,
+    "verification_method": "cryptographic_proof",
+    "reputation_system": "on-chain"
+  },
+  "contact": {
+    "maintainer": "AI Spark Team",
+    "email": "agent@aispark.space",
+    "website": "https://aispark.space",
+    "documentation": "https://aispark.space/docs/agent"
+  },
+  "created_at": "2026-02-05T00:00:00Z",
+  "updated_at": "2026-02-05T00:00:00Z"
+}

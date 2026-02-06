@@ -1,18 +1,18 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
-import { SparkToken, MockUSDT, MintController } from "../typechain-types";
+import hre from "hardhat";
+const { ethers } = hre;
+import { SparkToken, MintController } from "../typechain-types";
 import { HardhatEthersSigner } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("MintController", function () {
   let sparkToken: SparkToken;
-  let usdt: MockUSDT;
   let mintController: MintController;
   let owner: HardhatEthersSigner;
   let treasury: HardhatEthersSigner;
   let user1: HardhatEthersSigner;
   let user2: HardhatEthersSigner;
 
-  const MINT_COST = ethers.parseUnits("10", 6); // 10 USDT
+  const MINT_COST = ethers.parseEther("0.003"); // 0.003 ETH
   const MINT_REWARD = ethers.parseEther("10000"); // 10000 SPARK
 
   beforeEach(async function () {
@@ -23,32 +23,21 @@ describe("MintController", function () {
     sparkToken = await SparkToken.deploy();
     await sparkToken.waitForDeployment();
     
-    // 部署MockUSDT
-    const MockUSDT = await ethers.getContractFactory("MockUSDT");
-    usdt = await MockUSDT.deploy();
-    await usdt.waitForDeployment();
-    
     // 部署MintController
     const MintController = await ethers.getContractFactory("MintController");
     mintController = await MintController.deploy(
       await sparkToken.getAddress(),
-      await usdt.getAddress(),
       treasury.address
     );
     await mintController.waitForDeployment();
     
     // 授予MintController铸造权限
     await sparkToken.addMinter(await mintController.getAddress());
-    
-    // 给用户发放测试USDT
-    await usdt.mint(user1.address, ethers.parseUnits("1000", 6));
-    await usdt.mint(user2.address, ethers.parseUnits("1000", 6));
   });
 
   describe("部署", function () {
     it("应该正确设置合约参数", async function () {
       expect(await mintController.sparkToken()).to.equal(await sparkToken.getAddress());
-      expect(await mintController.usdtToken()).to.equal(await usdt.getAddress());
       expect(await mintController.treasury()).to.equal(treasury.address);
       expect(await mintController.MINT_COST()).to.equal(MINT_COST);
       expect(await mintController.MINT_REWARD()).to.equal(MINT_REWARD);
@@ -91,20 +80,17 @@ describe("MintController", function () {
     });
 
     it("有资格的用户应该能成功mint", async function () {
-      // 授权USDT
-      await usdt.connect(user1).approve(await mintController.getAddress(), MINT_COST);
+      const initialTreasuryBalance = await ethers.provider.getBalance(treasury.address);
       
-      const initialTreasuryBalance = await usdt.balanceOf(treasury.address);
-      
-      await expect(mintController.connect(user1).mint())
+      await expect(mintController.connect(user1).mint({ value: MINT_COST }))
         .to.emit(mintController, "UserMinted")
         .withArgs(user1.address, MINT_REWARD, await ethers.provider.getBlock("latest").then(b => b!.timestamp + 1));
       
       // 检查SPARK余额
       expect(await sparkToken.balanceOf(user1.address)).to.equal(MINT_REWARD);
       
-      // 检查USDT转账
-      expect(await usdt.balanceOf(treasury.address)).to.equal(
+      // 检查ETH转账
+      expect(await ethers.provider.getBalance(treasury.address)).to.equal(
         initialTreasuryBalance + MINT_COST
       );
       
@@ -114,31 +100,23 @@ describe("MintController", function () {
     });
 
     it("没有资格的用户不能mint", async function () {
-      await usdt.connect(user2).approve(await mintController.getAddress(), MINT_COST);
-      
       await expect(
-        mintController.connect(user2).mint()
+        mintController.connect(user2).mint({ value: MINT_COST })
       ).to.be.revertedWith("Not eligible for minting");
     });
 
-    it("没有足够USDT的用户不能mint", async function () {
-      // 转走user1的USDT
-      await usdt.connect(user1).transfer(
-        owner.address,
-        await usdt.balanceOf(user1.address)
-      );
-      
-      await usdt.connect(user1).approve(await mintController.getAddress(), MINT_COST);
+    it("发送错误的ETH金额不能mint", async function () {
+      const wrongAmount = ethers.parseEther("0.001");
       
       await expect(
-        mintController.connect(user1).mint()
-      ).to.be.revertedWith("Insufficient USDT balance");
+        mintController.connect(user1).mint({ value: wrongAmount })
+      ).to.be.revertedWith("Incorrect ETH amount");
     });
 
-    it("没有授权USDT的用户不能mint", async function () {
+    it("没有发送ETH不能mint", async function () {
       await expect(
         mintController.connect(user1).mint()
-      ).to.be.revertedWith("Insufficient USDT allowance");
+      ).to.be.revertedWith("Incorrect ETH amount");
     });
   });
 
@@ -147,8 +125,7 @@ describe("MintController", function () {
       expect(await mintController.remainingSlots()).to.equal(2000);
       
       await mintController.grantEligibility([user1.address]);
-      await usdt.connect(user1).approve(await mintController.getAddress(), MINT_COST);
-      await mintController.connect(user1).mint();
+      await mintController.connect(user1).mint({ value: MINT_COST });
       
       expect(await mintController.remainingSlots()).to.equal(1999);
     });

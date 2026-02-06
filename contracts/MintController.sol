@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./SparkToken.sol";
 
 /**
@@ -12,9 +11,8 @@ import "./SparkToken.sol";
  */
 contract MintController is Ownable, ReentrancyGuard {
     SparkToken public sparkToken;
-    IERC20 public usdtToken;
     
-    uint256 public constant MINT_COST = 10 * 10**6; // 10 USDT (6 decimals)
+    uint256 public constant MINT_COST = 0.003 ether; // 0.003 ETH (approximately $10 if ETH = $3333)
     uint256 public constant MINT_REWARD = 10000 * 10**18; // 10000 SPARK (18 decimals)
     uint256 public constant MAX_ELIGIBLE_USERS = 2000;
     
@@ -34,15 +32,12 @@ contract MintController is Ownable, ReentrancyGuard {
     
     constructor(
         address _sparkToken,
-        address _usdtToken,
         address _treasury
     ) Ownable(msg.sender) {
         require(_sparkToken != address(0), "Invalid spark token address");
-        require(_usdtToken != address(0), "Invalid USDT address");
         require(_treasury != address(0), "Invalid treasury address");
         
         sparkToken = SparkToken(_sparkToken);
-        usdtToken = IERC20(_usdtToken);
         treasury = _treasury;
     }
     
@@ -69,24 +64,16 @@ contract MintController is Ownable, ReentrancyGuard {
     /**
      * @dev Execute mint
      */
-    function mint() external nonReentrant {
+    function mint() external payable nonReentrant {
         require(isEligible[msg.sender], "Not eligible for minting");
         require(totalMintedUsers < MAX_ELIGIBLE_USERS, "Mint cap reached");
+        require(msg.value == MINT_COST, "Incorrect ETH amount");
         
-        require(
-            usdtToken.balanceOf(msg.sender) >= MINT_COST,
-            "Insufficient USDT balance"
-        );
-        require(
-            usdtToken.allowance(msg.sender, address(this)) >= MINT_COST,
-            "Insufficient USDT allowance"
-        );
+        // Transfer ETH to treasury
+        (bool success, ) = treasury.call{value: msg.value}("");
+        require(success, "ETH transfer failed");
         
-        require(
-            usdtToken.transferFrom(msg.sender, treasury, MINT_COST),
-            "USDT transfer failed"
-        );
-        
+        // Mint SPARK tokens to user
         sparkToken.mint(msg.sender, MINT_REWARD);
         
         if (!hasMinted[msg.sender]) {
